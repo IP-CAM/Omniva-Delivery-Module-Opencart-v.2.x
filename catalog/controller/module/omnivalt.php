@@ -15,7 +15,8 @@ class ControllerModuleOmnivalt extends Controller {
         $result = $this->fetchUpdates();
         return $result;
     }
-    public function fetchUpdates() {   
+    public function fetchUpdates() {  
+        $this->csvTerminal();
         $terminals = array();
         $csv = $this->fetchURL('https://www.omniva.ee/locations.csv');
         if ( empty($csv) ) return 'Omniva terminal update error: Empty CSV';
@@ -34,6 +35,24 @@ class ControllerModuleOmnivalt extends Controller {
         }
         echo "Omniva terminals not updated";
         return 'Omniva terminals not updated';
+    }
+    
+    public function csvTerminal()
+    {
+
+        $url = 'https://www.omniva.ee/locations.json';
+        $fp = fopen(DIR_DOWNLOAD . "locations.json", "w");
+        $curl = curl_init();
+        curl_setopt($curl, CURLOPT_URL, $url);
+        curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($curl, CURLOPT_HEADER, false);
+        curl_setopt($curl, CURLOPT_FILE, $fp);
+        curl_setopt($curl, CURLOPT_TIMEOUT, 60);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, FALSE);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+        $data = curl_exec($curl);
+        curl_close($curl);
+        fclose($fp);
     }
         
     private function fetchURL($url) {
