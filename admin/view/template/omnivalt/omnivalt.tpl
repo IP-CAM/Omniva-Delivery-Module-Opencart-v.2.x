@@ -44,9 +44,10 @@ echo $header, $column_left;
     <thead>
         <th width='5%'>id</th>
         <th width='15%'><?=$text_customer;?></th>
+        <th width='10%'><?=$text_status;?></th>
         <th width='15%'><?=$text_tracking_num;?></th>
-        <th width='15%'><?=$text_date;?></th>
-        <th width='15%'><?=$text_total;?></th>
+        <th width='10%'><?=$text_date;?></th>
+        <th width='10%'><?=$text_total;?></th>
         <th width='15%'><?=$text_labels;?></th>
     </thead>
 <?php foreach($newOrders as $nOrder) {?>
@@ -54,6 +55,7 @@ echo $header, $column_left;
 <tr>
         <td class='left'><?=$nOrder['order_id'];?></td>
         <td width='15%'><a href="<?php echo $client.'&order_id='.$nOrder['order_id'];?>" target="_blank"><?=$nOrder['full_name'];?></a></td>
+        <td width='10%'><?=$nOrder['status'];?></td>
         <td width='15%'>
                <?php
         $variable = json_decode($nOrder['tracking']);
@@ -65,8 +67,8 @@ echo $header, $column_left;
         }
         ?>
         </td>
-        <td width='15%'><?=$nOrder['date_modified'];?></td>
-        <td width='15%'><?=$nOrder['formated_total'];?></td>
+        <td width='10%'><?=$nOrder['date_modified'];?></td>
+        <td width='10%'><?=$nOrder['formated_total'];?></td>
         <td width='15%'>
         <a href="<?=$genLabels;?>&order_id=<?=$nOrder['order_id'];?>" target="_blank"><?=$generate_label;?></a>
         <?php if($nOrder['tracking'] == null) {?>
@@ -299,7 +301,7 @@ $(document).ready(function() {
                 </div>');
             } else {
                 $('.modal-body').append('<div class="alert alert-danger" id="remove">\
-                 <strong>Deja!</strong> klaidingas atsakymas.\
+                 <strong>Error:</strong> ' + data + '\
                 </div>');
             }
 
