@@ -976,6 +976,9 @@ class ControllerShippingOmnivalt extends Controller
 
     public function labels()
     {
+        $this->labelsFromApiLib(); //Use Omniva API library
+        return 0;
+
         if (isset($_GET['order_id'])) {
             $_POST['selected'] = array($_GET['order_id']);
         }
@@ -1318,6 +1321,12 @@ class ControllerShippingOmnivalt extends Controller
     }
     public function manifest()
     {
+        $result = $this->manifestFromApiLib(); //Use Omniva API library
+        if ( $result['status'] == 'error' ) {
+            echo $result['msg'];
+        }
+        return 0;
+        
         if (isset($_POST['selected']) && count($_POST['selected'])) {
             global $cookie;
             require_once DIR_SYSTEM . 'omnivalt_lib/tcpdf/tcpdf.php';
@@ -1692,5 +1701,486 @@ class ControllerShippingOmnivalt extends Controller
             echo "No orders selected";
             return 0;
         }
+    }
+
+    /** Use Omniva API library **/
+
+    public function labelsFromApiLib()
+    {
+        if ( isset($_GET['order_id']) ) {
+            $_POST['selected'] = array($_GET['order_id']);
+        }
+
+        if ( ! isset($_POST['selected']) || ! count($_POST['selected']) ) {
+            echo "No orders selected";
+            return 0;
+        }
+
+        $status_id = $this->readyStatus();
+        
+        $this->load->model('setting/setting');
+        $this->load->model('sale/order');
+
+        $errors = array();
+        $all_barcodes = array();
+        $status_id = $this->readyStatus();
+
+        foreach ( $_POST['selected'] as $order_id ) {
+            $order = $this->model_sale_order->getOrder($order_id);
+            $order_barcodes = null;
+
+            if ( ! (stripos($order['shipping_code'], 'omnivalt.courier') !== false
+                || stripos($order['shipping_code'], 'omnivalt.parcel_terminal') !== false)
+            ) {
+                $errors[$order_id] = 'Not Omniva Order';
+                continue;
+            }
+
+            $order_omniva_rows = $this->db->query("SELECT * FROM " . DB_PREFIX . "order_omniva WHERE id_order=" . $order_id . ";");
+            if ( $order_omniva_rows->num_rows > 0 ) {
+                foreach ( $order_omniva_rows->rows as $order_omniva_data ) {
+                    $order_barcodes = json_decode($order_omniva_data['tracking']);
+                }
+            } else {
+                if ( count($_POST['selected']) > 1 && ! $this->isOrderStatusIsAllowed($order['order_status_id']) ) {
+                    continue;
+                }
+                $result = $this->registerShipment($order_id);
+                if ( $result['status'] == 'error' ) {
+                    $errors[$order_id] = 'API error: ' . $result['msg'];
+                    continue;
+                }
+                $order_barcodes = $result['barcodes'];
+                $status_msg = implode(', ', $order_barcodes);
+                $this->updateOrderStatus($order_id, $status_id, $status_msg);
+                foreach ( $order_barcodes as $barcode ) {
+                    $this->setOmnivaOrder($order_id, $barcode);
+                }
+            }
+            if ( ! is_array($order_barcodes) ) {
+                continue;
+            }
+            foreach ( $order_barcodes as $barcode ) {
+                $all_barcodes[] = $barcode;
+            }
+        }
+
+        if ( empty($all_barcodes) ) {
+            if ( ! empty($errors) ) {
+                echo implode('<br/>', $errors) . '<br/><br/>';
+            }
+            echo 'No labels received for any order';
+            if ( count($_POST['selected']) > 1 ) {
+                echo '. When using a bulk action, labels are only allowed to be generated for Orders with the status "Processing".';
+            }
+            return 0;
+        }
+
+        $this->downloadLabels($all_barcodes);
+    }
+
+    private function setAuth( $object )
+    {
+        if( method_exists($object, 'setAuth') ) {
+            $object->setAuth(
+                $this->config->get('omnivalt_user'),
+                $this->config->get('omnivalt_password'),
+                $this->config->get('omnivalt_url')
+            );
+        }
+    }
+
+    private function getServiceCode( $pickup_method, $send_method )
+    {
+        switch ($pickup_method . ' ' . $send_method) {
+            case 'courier pt':
+                $service = "PU";
+                break;
+            case 'courier c':
+                $service = "QH";
+                break;
+            case 'parcel_terminal c':
+                $service = "PK";
+                break;
+            case 'parcel_terminal pt':
+                $service = "PA";
+                break;
+            case 'sorting_center c':
+                $service = "QL";
+                break;
+            case 'sorting_center pt':
+                $service = "PP";
+                break;
+            default:
+                $service = "";
+                break;
+        }
+
+        return $service;
+    }
+
+    private function getLabels( $barcodes )
+    {
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+
+        try {
+            $api_label = new \Mijora\Omniva\Shipment\Label();
+            $this->setAuth($api_label);
+
+            $labels = $api_label->getLabels($barcodes);
+            if ( empty($labels['labels']) ) {
+                return array(
+                    'status' => 'error',
+                    'msg' => 'Failed to get labels'
+                );
+            }
+            return array(
+                'status' => 'OK',
+                'labels' => $labels['labels']
+            );
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return array(
+                'status' => 'error',
+                'msg' => $e->getMessage()
+            );
+        }
+    }
+
+    private function downloadLabels( $barcodes )
+    {
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+
+        try {
+            $api_label = new \Mijora\Omniva\Shipment\Label();
+            $this->setAuth($api_label);
+
+            $api_label->downloadLabels($barcodes, true, 'D', 'Omnivalt_labels_' . date('Ymd_His'));
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return array(
+                'status' => 'error',
+                'msg' => $e->getMessage()
+            );
+        }
+    }
+
+    private function registerShipment( $order_id )
+    {
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+
+        $order = $this->model_sale_order->getOrder($order_id);
+        if ( stripos($order['shipping_code'], 'omnivalt') === false ) {
+            return array(
+                'status' => 'error',
+                'msg' => 'The Order delivery method is not Omniva'
+            );
+        }
+        
+        $send_method = false;
+        if (stripos($order['shipping_code'], 'parcel_terminal') !== false) {
+            $send_method = 'pt';
+        }
+        if (stripos($order['shipping_code'], 'courier') !== false) {
+            $send_method = 'c';
+        }
+        if ( ! $send_method ) {
+            return array(
+                'status' => 'error',
+                'msg' => 'Unable to determine delivery type'
+            );
+        }
+
+        $service = $this->getServiceCode($this->config->get('omnivalt_pickup_type'), $send_method);
+        if ( empty($service) ) {
+            return array(
+                'status' => 'error',
+                'msg' => 'Failed to set up the delivery service code'
+            );
+        }
+        
+        $products = $this->model_sale_order->getOrderProducts($order_id);
+        $packages = array($order_id => $products); //Temporary, creating the possibility of future use of MPS
+        
+        $order_weight = $this->getOrderWeight($order['order_id']);
+        if ( $order_weight === null ) {
+            $order_weight = 0;
+        }
+
+        $sender = $this->getSenderData();
+
+        $receiver_name = $order['shipping_firstname'] . ' ' . $order['shipping_lastname'];
+        $receiver_country = $order['shipping_iso_code_2'];
+        $receiver_city = ($order['shipping_city']) ? $order['shipping_city'] : $order['shipping_zone'];
+        $receiver_street = $order['shipping_address_1'];
+        $receiver_postcode = preg_match('/\d+/', $order['shipping_postcode'], $matches);
+        $receiver_postcode = ($receiver_postcode) ? $matches[0] : '';
+        $receiver_mobile_phone = $order['telephone'];
+        $receiver_email = $order['email'];
+
+        $terminal_id = false;
+        if ( stripos($order['shipping_code'], 'parcel_terminal_') !== false ) {
+            $terminal_id = str_ireplace('omnivalt.parcel_terminal_', '', $order['shipping_code']);
+        }
+        
+        $additional_services = array('ST' => null);
+        if ( $this->orderPaymentMethodIsCod($order) ) {
+            $additional_services['BP'] = ($order['cod_amount'] > 0) ? $order['cod_amount'] : $order['total'];
+        }
+
+        try {
+            $api_shipment = new \Mijora\Omniva\Shipment\Shipment();
+            $api_shipment
+                ->setShowReturnCodeEmail(true)
+                ->setShowReturnCodeSms(true);
+
+            $api_shipmentHeader = new \Mijora\Omniva\Shipment\ShipmentHeader();
+            $api_shipmentHeader
+                ->setSenderCd($sender->username)
+                ->setFileId(\Date('YmdHis'));
+            $api_shipment->setShipmentHeader($api_shipmentHeader);
+            
+            $all_api_packages = array();
+            foreach ( $packages as $package_id => $package_products ) {
+                $api_package = new \Mijora\Omniva\Shipment\Package\Package();
+                $api_package
+                    ->setId($package_id)
+                    ->setService($service);
+
+                $all_api_additional_services = array();
+                foreach ( $additional_services as $addtional_service_code => $addtional_service_value ) {
+                    $api_additional_service = new \Mijora\Omniva\Shipment\Package\AdditionalService();
+                    if ( $addtional_service_code == 'BP' ) {
+                        $api_cod = new \Mijora\Omniva\Shipment\Package\Cod();
+                        $api_cod
+                            ->setAmount($addtional_service_value)
+                            ->setBankAccount($sender->bank_account)
+                            ->setReceiverName($sender->company)
+                            ->setReferenceNumber(self::getReferenceNumber($order['order_id']));
+                        $api_package->setCod($api_cod);
+                        //continue; //It is not clear if it need
+                    }
+                    $all_api_additional_services[] = $api_additional_service->setServiceCode($addtional_service_code);
+                }
+                $api_package->setAdditionalServices($all_api_additional_services);
+
+                $weight = $order_weight / count($packages);
+                if ( ! $weight ) {
+                    $weight = 1;
+                }
+                $api_measures = new \Mijora\Omniva\Shipment\Package\Measures();
+                $api_measures
+                    //->setLength(1)
+                    //->setHeight(1)
+                    //->setWidth(1)
+                    ->setWeight($weight);
+                $api_package->setMeasures($api_measures);
+
+                $api_receiver_contact = new \Mijora\Omniva\Shipment\Package\Contact();
+                $api_receiver_address = new \Mijora\Omniva\Shipment\Package\Address();
+                $api_receiver_address
+                    ->setCountry($receiver_country)
+                    ->setPostcode($receiver_postcode)
+                    ->setDeliverypoint($receiver_city)
+                    ->setStreet($receiver_street);
+                if ( $terminal_id ) {
+                    $api_receiver_address->setOffloadPostcode($terminal_id);
+                }
+                $api_receiver_contact
+                    ->setAddress($api_receiver_address)
+                    ->setEmail($receiver_email)
+                    ->setMobile($receiver_mobile_phone)
+                    ->setPersonName($receiver_name);
+                $api_package->setReceiverContact($api_receiver_contact);
+
+                $api_sender_contact = new \Mijora\Omniva\Shipment\Package\Contact();
+                $api_sender_address = new \Mijora\Omniva\Shipment\Package\Address();
+                $api_sender_address
+                    ->setCountry($sender->country)
+                    ->setPostcode($sender->postcode)
+                    ->setDeliverypoint($sender->city)
+                    ->setStreet($sender->street);
+                $api_sender_contact
+                    ->setAddress($api_sender_address)
+                    ->setMobile($sender->mobile_phone)
+                    ->setPersonName($sender->name);
+                $api_package->setSenderContact($api_sender_contact);
+
+                $all_api_packages[] = $api_package;
+            }
+            $api_shipment->setPackages($all_api_packages);
+
+            $this->setAuth($api_shipment);
+            $result = $api_shipment->registerShipment();
+            return array(
+                'status' => 'OK',
+                'barcodes' => $result['barcodes']
+            );
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return array(
+                'status' => 'error',
+                'msg' => $e->getMessage()
+            );
+        }
+    }
+
+    private function manifestFromApiLib()
+    {
+        if ( ! isset($_POST['selected']) || ! count($_POST['selected']) ) {
+            echo "No orders selected";
+            return 0;
+        }
+
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+        $this->load->model('sale/order');
+
+        $sender = $this->getSenderData();
+        $ready_status_id = $this->getReadyforShippingStatusId();
+
+        try {
+            $api_address = new \Mijora\Omniva\Shipment\Package\Address();
+            $api_address
+                ->setCountry($sender->country)
+                ->setPostcode($sender->postcode)
+                ->setDeliverypoint($sender->city)
+                ->setStreet($sender->street);
+            
+            $api_contact = new \Mijora\Omniva\Shipment\Package\Contact();
+            $api_contact
+                ->setAddress($api_address)
+                ->setMobile($sender->mobile_phone)
+                ->setPersonName($sender->name);
+
+            $api_manifest = new \Mijora\Omniva\Shipment\Manifest();
+            $api_manifest
+                ->setSender($api_contact)
+                ->showBarcode(false);
+
+            $api_manifest
+                ->setString('sender_address', 'Siuntėjo adresas')
+                ->setString('row_number', 'Nr.')
+                ->setString('shipment_number', 'Siuntos numeris')
+                ->setString('order_number', 'Užsakymo nr.')
+                ->setString('date', 'Data')
+                ->setString('quantity', 'Kiekis')
+                ->setString('weight', 'Svoris (kg)')
+                ->setString('recipient_address', 'Gavėjo adresas')
+                ->setString('courier_signature', 'Kurjerio vardas, pavardė, parašas')
+                ->setString('sender_signature', 'Siuntėjo vardas, pavardė, parašas');
+
+            foreach ( $_POST['selected'] as $order_id ) {
+                $order = $this->model_sale_order->getOrder($order_id);
+
+                if ( ! $this->isOrderStatusIsAllowed($order['order_status_id']) && $order['order_status_id'] != $ready_status_id ) {
+                    continue;
+                }
+
+                $order_barcodes = null;
+
+                if ( ! (stripos($order['shipping_code'], 'omnivalt.courier') !== false
+                    || stripos($order['shipping_code'], 'omnivalt.parcel_terminal') !== false)
+                ) {
+                    continue;
+                }
+
+                $order_weight = $this->getOrderWeight($order_id);
+                if ( $order_weight === null ) {
+                    $order_weight = 0;
+                }
+
+                $order_omniva_rows = $this->db->query("SELECT * FROM " . DB_PREFIX . "order_omniva WHERE id_order=" . $order_id . ";");
+                if ( $order_omniva_rows->num_rows > 0 ) {
+                    foreach ( $order_omniva_rows->rows as $order_omniva_data ) {
+                        $order_barcodes = json_decode($order_omniva_data['tracking']);
+                    }
+                } else {
+                    continue;
+                }
+
+                if ( empty($order_barcodes) ) {
+                    continue;
+                }
+
+                $weight = $order_weight / count($order_barcodes);
+                if ( ! $weight ) {
+                    $weight = 1;
+                }
+
+                foreach ( $order_barcodes as $barcode ) {
+                    $api_order = new \Mijora\Omniva\Shipment\Order();
+                    $api_order
+                        ->setOrderNumber($order_id)
+                        ->setTracking($barcode)
+                        ->setQuantity(1)
+                        ->setWeight($weight)
+                        ->setReceiver($order['shipping_firstname'] . ' ' . $order['shipping_lastname'] . ', ' . $order['shipping_address_1'] . ', ' . $order['shipping_city'] . ', ' . $order['shipping_postcode'] . ', ' . $order['shipping_country']);
+                    $api_manifest->addOrder($api_order);
+                }
+            }
+
+            $api_manifest->downloadManifest('I', 'Omnivalt_manifest');
+
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return array(
+                'status' => 'error',
+                'msg' => $e->getMessage()
+            );
+        }
+    }
+
+    private function getSenderData()
+    {
+        return (object) array(
+            'username' => $this->config->get('omnivalt_user'),
+            'name' => $this->config->get('omnivalt_sender_name'),
+            'company' => $this->config->get('omnivalt_company'),
+            'bank_account' => $this->config->get('omnivalt_bankaccount'),
+            'country' => $this->config->get('omnivalt_sender_country_code'),
+            'city' => $this->config->get('omnivalt_sender_city'),
+            'street' => $this->config->get('omnivalt_sender_address'),
+            'postcode' => $this->config->get('omnivalt_sender_postcode'),
+            'mobile_phone' => $this->config->get('omnivalt_sender_phone'),
+        );
+    }
+
+    private function orderPaymentMethodIsCod( $order )
+    {
+        $available_cod_methods = array('cod', 'GOP_COD');
+        if ( (in_array($order['payment_code'], $available_cod_methods) || $order['cod_amount'] > 0) && intval($order['cod_amount']) != 888888 ) {
+            return true;
+        }
+        return false;
+    }
+
+    private function isOrderStatusIsAllowed( $order_status_id )
+    {
+        $allowed_status = array('Processing', 'Vykdomas');
+
+        $sql_where = '';
+        foreach ( $allowed_status as $status ) {
+            if ( ! empty($sql_where) ) {
+                $sql_where .= " OR ";
+            }
+            $sql_where .= "`name` = '" . $status . "'";
+        }
+
+        $query = $this->db->query("SELECT order_status_id FROM `" . DB_PREFIX . "order_status` WHERE " . $sql_where);
+        if ( ! empty($query->rows) ) {
+            foreach ( $query->rows as $row ) {
+                if ( $row['order_status_id'] == $order_status_id ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function getReadyforShippingStatusId()
+    {
+        $query = $this->db->query("SELECT order_status_id FROM `" . DB_PREFIX . "order_status` WHERE `name` = 'Ready for shipping'");
+        if ($query->row) {
+            return $query->row['order_status_id'];
+        }
+
+        return 0;
     }
 }

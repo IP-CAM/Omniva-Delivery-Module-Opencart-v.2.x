@@ -68,7 +68,7 @@ class ControllerOmnivaltOmnivalt extends Controller
           $newOrders = $this->db->query(
             "
             SELECT order_id, A.total, A.currency_value, A.currency_code, A.date_modified, labelscount, CONCAT(firstname, ' ', lastname) AS full_name, 
-            B.tracking, B.manifest, B.labels, B.id_order
+            B.tracking, B.manifest, B.labels, B.id_order, (SELECT name FROM `" . DB_PREFIX . "order_status` WHERE order_status_id = A.order_status_id LIMIT 1) AS status
             FROM `" . DB_PREFIX . "order` A
             LEFT JOIN `" . DB_PREFIX . "order_omniva` B ON A.order_id = B.id_order
             WHERE order_status_id != 0 AND shipping_code LIKE 'omnivalt%' AND (B.tracking IS NULL OR B.manifest = $manifest)
@@ -144,6 +144,7 @@ class ControllerOmnivaltOmnivalt extends Controller
         $data['text_add_order'] = $this->language->get('text_add_order');
         $data['renew'] = $this->language->get('renew');
         $data['text_tracking_num'] = $this->language->get('text_tracking_num');
+        $data['text_status'] = $this->language->get('entry_status');
         $data['text_skipped_zero'] = $this->language->get('text_skipped_zero');
         $data['text_new_zero'] = $this->language->get('text_new_zero');
         $data['text_start_search'] = $this->language->get('text_start_search');
@@ -250,6 +251,12 @@ class ControllerOmnivaltOmnivalt extends Controller
 
     public function callCarrier()
     {
+        $response = $this->callCarrierFromApiLib(); //Use Omniva API library
+        if ( $response === true ) {
+            return $this->response->setOutput('got_request');
+        }
+        return $this->response->setOutput(json_encode($response));
+        
       $pickStart = $this->config->get('omnivalt_pickupstart')?$this->config->get('omnivalt_pickupstart'):'8:00';
       $pickFinish = $this->config->get('omnivalt_pickupfinish')?$this->config->get('omnivalt_pickupfinish'):'17:00';
       $pickDay = date('Y-m-d');
@@ -303,4 +310,40 @@ class ControllerOmnivaltOmnivalt extends Controller
 
     }
 
+    /** Use Omniva API library **/
+    private function callCarrierFromApiLib()
+    {
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+
+        try {
+            $api_address = new \Mijora\Omniva\Shipment\Package\Address();
+            $api_address
+                ->setCountry($this->config->get('omnivalt_sender_country_code'))
+                ->setPostcode($this->config->get('omnivalt_sender_postcode'))
+                ->setDeliverypoint($this->config->get('omnivalt_sender_city'))
+                ->setStreet($this->config->get('omnivalt_sender_address'));
+
+            $api_contact = new \Mijora\Omniva\Shipment\Package\Contact();
+            $api_contact
+                ->setAddress($api_address)
+                ->setMobile($this->config->get('omnivalt_sender_phone'))
+                ->setPersonName($this->config->get('omnivalt_sender_name'));
+
+            $api_callCourier = new \Mijora\Omniva\Shipment\CallCourier();
+            $api_callCourier->setAuth(
+                $this->config->get('omnivalt_user'),
+                $this->config->get('omnivalt_password'),
+                $this->config->get('omnivalt_url')
+            );
+            $api_callCourier
+                ->setSender($api_contact)
+                ->setEarliestPickupTime($this->config->get('omnivalt_pickupstart'))
+                ->setLatestPickupTime($this->config->get('omnivalt_pickupfinish'))
+                ->setDestinationCountry('other')
+                ->setParcelsNumber(1);
+            return $api_callCourier->callCourier();
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return $e->getMessage();
+        }
+    }
 }

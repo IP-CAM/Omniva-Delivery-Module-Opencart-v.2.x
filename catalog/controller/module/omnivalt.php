@@ -15,7 +15,10 @@ class ControllerModuleOmnivalt extends Controller {
         $result = $this->fetchUpdates();
         return $result;
     }
-    public function fetchUpdates() {  
+    public function fetchUpdates() {
+        $result = $this->fetchUpdatesFromApiLib(); // Use Omniva API library
+        return $result['msg'];
+
         $this->csvTerminal();
         $terminals = array();
         $csv = $this->fetchURL('https://www.omniva.ee/locations.csv');
@@ -108,5 +111,63 @@ class ControllerModuleOmnivalt extends Controller {
         } else {
             return $url;
         }
+    }
+
+    /** Use Omniva API library **/
+    public function fetchUpdatesFromApiLib() {
+        require_once DIR_SYSTEM . 'omnivalt_lib/autoload.php';
+
+        try {
+            $api_pickupPoints = new \Mijora\Omniva\Locations\PickupPoints();
+
+            $terminals = $api_pickupPoints->getFilteredLocations('', 0); //Get only parcel terminals
+            $this->saveTerminals($terminals);
+            return array(
+                'status' => 'success',
+                'msg' => 'Omniva terminals updated'
+            );
+        } catch (\Mijora\Omniva\OmnivaException $e) {
+            return array(
+                'status' => 'error',
+                'msg' => $e->getMessage()
+            );
+        }
+    }
+    private function saveTerminals( $terminals_org_list ) {
+        $terminals = array();
+
+        foreach ( $terminals_org_list as $terminal ) {
+            $address = $terminal['A2_NAME'];
+            if ( ! empty($terminal['A5_NAME']) ) {
+                $address .= ' ' . $terminal['A5_NAME'];
+            }
+            if ( ! empty($terminal['A7_NAME']) ) {
+                $address .= ' ' . $terminal['A7_NAME'];
+            }
+
+            $comment = (! empty($terminal['comment_eng'])) ? $terminal['comment_eng'] : '';
+            $comment_map = array(
+                'LT' => 'comment_lit',
+                'LV' => 'comment_lav',
+                'EE' => 'comment_est',
+            );
+            if ( isset($comment_map[$terminal['A0_NAME']]) && ! empty($terminal[$comment_map[$terminal['A0_NAME']]]) ) {
+                $comment = $terminal[$comment_map[$terminal['A0_NAME']]];
+            }
+            
+            $terminals[] = array(
+                $terminal['NAME'],
+                $terminal['A1_NAME'],
+                $address,
+                $terminal['ZIP'],
+                $comment,
+                $terminal['A0_NAME'],
+            );
+        }
+
+        $key = 'omnivalt_terminals_LT';
+        $this->db->query("UPDATE " . DB_PREFIX . "setting 
+        SET `value` = '" . $this->db->escape(serialize($terminals)) . "', serialized = '1' 
+        WHERE `key` = '" . $this->db->escape($key) . "'");
     }
 }
